@@ -10,8 +10,9 @@
 //
 //   catMult  = median(mcap_usd / tvl_usd) over the live-token protocols of the same category
 //              (at least 3 of them, else the global median over all live-token protocols),
-//              clamped to [0.05, 2.0]. A lending protocol is priced like lending protocols
-//              trade, a bridge like bridges trade.
+//              clamped to [0.05, 2.0]. Centralised exchanges are left out of both medians:
+//              they trade as exchange equity, not as DeFi protocols. A lending protocol
+//              is priced like lending protocols trade, a bridge like bridges trade.
 //   growth   = clamp(change_7d, -60, 120) per cent
 //   growthM  = 1 + (growth / 100) * 0.5
 //   maturity = 0.6 + min(age_days, 1095) / 1095 * 0.4   (age unknown: 365 days)
@@ -213,6 +214,10 @@ export function categoryMultiples(
   const perCategory = new Map<string, number[]>();
   const all: number[] = [];
   for (const p of snapshot.protocols) {
+    // Centralised exchanges trade as exchange equity, not as DeFi protocols: their
+    // market-cap-per-TVL (one is 69x here) must not price any pre-token category, and
+    // the live view already sets CEX aside for the same reason.
+    if (p.category === 'CEX') continue;
     if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
     const ratio = p.mcap_usd / p.tvl_usd;
     if (!Number.isFinite(ratio) || ratio <= 0) continue;

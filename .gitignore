@@ -1,2 +1,50 @@
+# Token Radar — generated output and local tooling stay out of the repo.
+# The entry ships dashboard/, screenshots/ and source; everything below is
+# rebuilt by `node main.ts` or produced by local checks, never hand-edited.
+
+# Build / scorer output (regenerated deterministically by main.ts).
 out/
 out2/
+output/
+dist/
+build/
+
+# Playwright / gatecheck scratch: screenshots, traces and local reports.
+playwright-report/
+test-results/
+.traces/
+shots/
+coverage/
+.cache/
+*.tmp
+*.log
+*.tsbuildinfo
+*.png
+*.jpg
+*.jpeg
+*.webp
+!screenshots/*.jpg
+
+# Node tooling and editor state.
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
+
+# OS and editor files.
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local environment and secrets — never commit these.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
