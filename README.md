@@ -8,7 +8,7 @@ Every pre-token protocol in the sealed DefiLlama snapshot, ranked by what its
 launch would be worth, each with a farm plan. Built for make.fun's
 token-radar-01 bounty ($1,325).
 
-## The model (radar-2)
+## The model (radar-3)
 
 Implied value is priced off the snapshot's own live market, never a fixed
 multiple and never a hand-picked name:
@@ -18,23 +18,28 @@ implied = round(TVL x category_multiple x growth x maturity x breadth)
 ```
 
 - **category_multiple** — median market-cap-per-TVL of the live-token
-  protocols in the same category (min 3, else the global median 0.2138),
-  clamped to [0.05, 2.0]. Lending is priced like lending trades.
+  protocols in the same category, shrunk toward the global median 0.2460
+  with weight n / (n + 8) for n live names (min 3, else the global median),
+  clamped to [0.05, 2.0]. Lending is priced like lending trades, and a
+  3-name median no longer prices a whole category on its own.
 - **growth** — `1 + clamp(change_7d, -60, 120) / 100 x 0.5`
 - **maturity** — `0.6 + min(age_days, 1095) / 1095 x 0.4` (unknown age: 365d)
 - **breadth** — `1 + 0.03 x min(chains - 1, 10)`, at most x1.30
 
 The board ranks **every** rankable pre-token protocol (watchlist + all
 pre-token protocols below the $50M floor), so a launch is found early.
-Live-token protocols are set aside with their market caps shown.
+Live-token protocols are set aside with their market caps shown, 40 of
+them, each with its own market-cap-per-TVL so the reader can see what
+each category multiple is priced from.
 
 ## The dashboard
 
 Static, no network: sortable board, search + category + chain filters,
 early-only toggle, pre-token / live-token tabs, and a detail view per
-protocol with the full model breakdown and a 6-step farm plan (every step
-states its cost and time). The page recomputes each row and checks it
-against board.json.
+protocol with the full model breakdown, the live-token peers its multiple
+is priced from, and an 8-step farm plan (every step states its cost and
+time). A category pricing table shows every multiple with its sample and
+raw median. The page recomputes each row and checks it against board.json.
 
 ## Run
 

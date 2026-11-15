@@ -1,4 +1,4 @@
-// Token Radar's model (radar-2): one sealed snapshot in, one ranked board out.
+// Token Radar's model (radar-3): one sealed snapshot in, one ranked board out.
 //
 // The board ranks every pre-token protocol the snapshot can rank: the watchlist is the floor
 // (every watchlist slug is always in) and the early radar adds every other pre-token protocol
@@ -8,11 +8,15 @@
 //
 // Implied value is priced off the snapshot's own live market, not off a fixed multiple:
 //
-//   catMult  = median(mcap_usd / tvl_usd) over the live-token protocols of the same category
-//              (at least 3 of them, else the global median over all live-token protocols),
-//              clamped to [0.05, 2.0]. Centralised exchanges are left out of both medians:
-//              they trade as exchange equity, not as DeFi protocols. A lending protocol
-//              is priced like lending protocols trade, a bridge like bridges trade.
+//   catMult  = the category's live median market-cap-per-TVL, shrunk toward the global
+//              median by sample size: w = n / (n + 8), mult = w * median + (1 - w) * global.
+//              A category with fewer than 3 live protocols falls back to the global median
+//              outright, so no multiple ever rests on one or two names, and a category with
+//              3 or 4 names is no longer priced by its raw median alone (a 4-name median of
+//              1.22x, or a 3-name median of 0.97x, is mostly noise). The result is clamped
+//              to [0.05, 2.0]. Centralised exchanges are left out of both medians: they trade
+//              as exchange equity, not as DeFi protocols. A lending protocol is priced like
+//              lending protocols trade, a bridge like bridges trade.
 //   growth   = clamp(change_7d, -60, 120) per cent
 //   growthM  = 1 + (growth / 100) * 0.5
 //   maturity = 0.6 + min(age_days, 1095) / 1095 * 0.4   (age unknown: 365 days)
@@ -60,6 +64,7 @@ export interface ModelConstants {
   multiple_floor: number;
   multiple_cap: number;
   min_category_sample: number;
+  shrinkage_prior: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -75,13 +80,14 @@ export const MODEL: ModelConstants = {
   multiple_floor: 0.05,
   multiple_cap: 2.0,
   min_category_sample: 3,
+  shrinkage_prior: 8,
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
-export const LIVE_ROWS = 24;
+export const LIVE_ROWS = 40;
 
 /** A farm step: the action, what it costs, and how long it takes. */
 export interface FarmStep {
@@ -108,6 +114,7 @@ export interface BoardRow {
   implied_value_usd: number;
   model: {
     category_multiple: number;
+    category_sample: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -131,6 +138,7 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   category_multiple: number;
+  category_sample: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   breadth_multiplier: number;
@@ -146,6 +154,16 @@ export interface LiveRow {
   tvl_usd: number;
   mcap_usd: number | null;
   change_7d: number | null;
+  /** Its own market-cap-per-TVL, the ratio the model prices its category from. */
+  multiple: number | null;
+}
+
+/** One category's pricing: the multiple the model uses, and what it rests on. */
+export interface CategoryPricing {
+  category: string;
+  multiple: number;
+  sample: number;
+  median: number;
 }
 
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
@@ -160,6 +178,7 @@ export interface RadarData {
   early_size: number;
   live_size: number;
   global_multiple: number;
+  categories: CategoryPricing[];
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -203,14 +222,20 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
 
 /**
  * The comparable multiples: for every category, the median market-cap-per-TVL of its
- * live-token protocols, and the global median over all of them. A category with fewer
- * than `min_category_sample` live protocols falls back to the global median, so no
- * multiple ever rests on one or two names.
+ * live-token protocols shrunk toward the global median by sample size, and the global
+ * median over all of them. A category with fewer than `min_category_sample` live
+ * protocols falls back to the global median, so no multiple ever rests on one or two
+ * names; a category with 3 or 4 names is pulled most of the way to the global median
+ * (its weight is n / (n + shrinkage_prior)), because a median of 3 is mostly noise —
+ * on this snapshot the raw 4-name median of Cross Chain Bridge is 1.22x and the raw
+ * 3-name median of Privacy is 0.97x, and neither survives shrinkage (0.57x, 0.44x).
+ * `detail` carries every priced category with its sample and raw median, so the
+ * dashboard can show what each multiple rests on.
  */
 export function categoryMultiples(
   snapshot: Snapshot,
   model: ModelConstants = MODEL,
-): { byCategory: Map<string, number>; global: number } {
+): { byCategory: Map<string, number>; global: number; detail: Map<string, { multiple: number; sample: number; median: number }> } {
   const perCategory = new Map<string, number[]>();
   const all: number[] = [];
   for (const p of snapshot.protocols) {
@@ -229,12 +254,19 @@ export function categoryMultiples(
   }
   const global = clamp(median(all) ?? 0.2, model.multiple_floor, model.multiple_cap);
   const byCategory = new Map<string, number>();
+  const detail = new Map<string, { multiple: number; sample: number; median: number }>();
   for (const [key, ratios] of perCategory) {
-    if (ratios.length >= model.min_category_sample) {
-      byCategory.set(key, clamp(median(ratios) ?? global, model.multiple_floor, model.multiple_cap));
-    }
+    if (ratios.length < model.min_category_sample) continue;
+    const raw = median(ratios) ?? global;
+    // Shrinkage: a small sample's median is pulled toward the global median, with
+    // weight n / (n + prior). A 15-name category keeps two thirds of its own median;
+    // a 3-name category keeps barely a quarter of it.
+    const weight = ratios.length / (ratios.length + model.shrinkage_prior);
+    const multiple = clamp(weight * raw + (1 - weight) * global, model.multiple_floor, model.multiple_cap);
+    byCategory.set(key, multiple);
+    detail.set(key, { multiple: round4(multiple), sample: ratios.length, median: round4(clamp(raw, model.multiple_floor, model.multiple_cap)) });
   }
-  return { byCategory, global };
+  return { byCategory, global, detail };
 }
 
 /** The multipliers and the implied value one protocol gets under `model`. */
@@ -243,7 +275,7 @@ export function impliedValue(
   asOf: string,
   multiples: { byCategory: Map<string, number>; global: number },
   model: ModelConstants = MODEL,
-): { implied: number; catMult: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
+): { implied: number; catMult: number; catSample: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = clamp(rawGrowth, model.growth_floor, model.growth_cap);
@@ -257,7 +289,16 @@ export function impliedValue(
   const catMult = multiples.byCategory.get(protocol.category ?? 'Other') ?? multiples.global;
   const base = protocol.tvl_usd * catMult;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult * breadthMult));
-  return { implied, catMult, growthPct, growthMult, maturityMult, breadthMult, age };
+  return { implied, catMult, catSample: categorySample(protocol, multiples), growthPct, growthMult, maturityMult, breadthMult, age };
+}
+
+/** How many live-token protocols the protocol's category multiple rests on (0: the global median). */
+function categorySample(
+  protocol: SnapshotProtocol,
+  multiples: { byCategory: Map<string, number>; global: number; detail?: Map<string, { multiple: number; sample: number; median: number }> },
+): number {
+  if (!multiples.byCategory.has(protocol.category ?? 'Other')) return 0;
+  return multiples.detail?.get(protocol.category ?? 'Other')?.sample ?? 0;
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -350,6 +391,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       // the row from this number, and a rounded multiple would recompute to a different
       // implied value than board.json carries. Display rounds it; the model does not.
       category_multiple: s.catMult,
+      category_sample: s.catSample,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -421,10 +463,26 @@ function weeklyFor(p: SnapshotProtocol): string {
   return 'a deposit, a swap or a vote';
 }
 
+/** The second position type a farmer adds once the first one is open, by category. */
+function secondActionFor(p: SnapshotProtocol, capital: number, chain: string): string {
+  const c = (p.category ?? '').toLowerCase();
+  const name = p.name;
+  const half = Math.max(25, Math.round(capital / 2));
+  if (c.includes('dex') || c.includes('yield')) return `Open a second position of $${half} in a different ${name} pool on ${chain}, so the wallet is not a one-pool farmer.`;
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Borrow a small amount against the supply on ${name} and repay it within the week, so the wallet shows both sides of the market.`;
+  if (c.includes('perpetual') || c.includes('derivative')) return `Place one limit order of $${half} on ${name} beside the open trade, so the wallet shows maker activity too.`;
+  if (c.includes('curator') || c.includes('allocator')) return `Deposit $${half} into a second ${name} vault on ${chain} with a different strategy, so the wallet is not a one-vault farmer.`;
+  if (c.includes('staking') || c.includes('restak')) return `Stake a further $${half} through ${name} on a second validator or pool, so the wallet is not tied to one receipt.`;
+  return `Make a second, smaller deposit of $${half} into ${name} on ${chain} a week after the first, so the wallet shows repeated use.`;
+}
+
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is
+ * A protocol's farm plan: eight steps, each an action with a cost and a time. The plan is
  * derived from the protocol's own record (category, chains, TVL, age), never from a
- * hand-written list of names.
+ * hand-written list of names. The new fourth step is the one farmers skip and scammers
+ * count on: verify the address and the points page from the protocol's own site before
+ * the money moves, because a fake farm page costs the whole position, and the fifth
+ * step adds a second position type so the wallet is not a one-action farmer.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
@@ -444,9 +502,19 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '15 minutes to set up',
     },
     {
-      text: `Make one qualifying action each week, such as ${weekly}, so the wallet stays active.`,
+      text: `Make one qualifying action each week, such as ${weekly}, so the wallet stays active and any points program sees it.`,
       cost: 'about $2 of gas a week',
       time: '10 minutes a week',
+    },
+    {
+      text: `Before you send anything, open ${p.name}'s own site from the link DefiLlama lists for it and check the contract address and the points page match; never connect a wallet from a link in a reply, an ad or a direct message.`,
+      cost: 'nothing to check',
+      time: '5 minutes',
+    },
+    {
+      text: secondActionFor(p, capital, chain),
+      cost: `about $${Math.max(25, Math.round(capital / 2))} of capital and about $3 of gas`,
+      time: '15 minutes',
     },
     {
       text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
@@ -480,6 +548,10 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
       tvl_usd: p.tvl_usd,
       mcap_usd: p.mcap_usd,
       change_7d: p.change_7d,
+      multiple:
+        p.mcap_usd !== null && p.tvl_usd > 0 && Number.isFinite(p.mcap_usd / p.tvl_usd)
+          ? round4(p.mcap_usd / p.tvl_usd)
+          : null,
     }));
 }
 
@@ -498,6 +570,7 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     category_multiple: row.model.category_multiple,
+    category_sample: row.model.category_sample,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     breadth_multiplier: row.model.breadth_multiplier,
@@ -511,7 +584,10 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const live = liveRows(snapshot);
   const watchlist = new Set(snapshot.watchlist);
   const early = board.filter((r) => !watchlist.has(r.slug)).length;
-  const { global } = categoryMultiples(snapshot, model);
+  const { global, detail } = categoryMultiples(snapshot, model);
+  const categories: CategoryPricing[] = [...detail.values()]
+    .map((d, i) => ({ category: [...detail.keys()][i]!, multiple: d.multiple, sample: d.sample, median: d.median }))
+    .sort((a, b) => b.multiple - a.multiple || a.category.localeCompare(b.category));
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -523,6 +599,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     early_size: early,
     live_size: live.length,
     global_multiple: round4(global),
+    categories,
     rows: board.map((r) => radarRow(r, watchlist)),
     live,
   };

@@ -106,6 +106,17 @@
     if (c.indexOf('prediction') >= 0) return 'a market position';
     return 'a deposit, a swap or a vote';
   }
+  function secondActionFor(p, capital, chain) {
+    var c = (p.category || '').toLowerCase();
+    var name = p.name;
+    var half = Math.max(25, Math.round(capital / 2));
+    if (c.indexOf('dex') >= 0 || c.indexOf('yield') >= 0) return 'Open a second position of $' + half + ' in a different ' + name + ' pool on ' + chain + ', so the wallet is not a one-pool farmer.';
+    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'Borrow a small amount against the supply on ' + name + ' and repay it within the week, so the wallet shows both sides of the market.';
+    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0) return 'Place one limit order of $' + half + ' on ' + name + ' beside the open trade, so the wallet shows maker activity too.';
+    if (c.indexOf('curator') >= 0 || c.indexOf('allocator') >= 0) return 'Deposit $' + half + ' into a second ' + name + ' vault on ' + chain + ' with a different strategy, so the wallet is not a one-vault farmer.';
+    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) return 'Stake a further $' + half + ' through ' + name + ' on a second validator or pool, so the wallet is not tied to one receipt.';
+    return 'Make a second, smaller deposit of $' + half + ' into ' + name + ' on ' + chain + ' a week after the first, so the wallet shows repeated use.';
+  }
   function stepText(step) {
     var s = step.text + ' Cost: ' + step.cost + '. Time: ' + step.time + '.';
     if (s.length > 600) s = s.slice(0, 596) + '...';
@@ -119,11 +130,19 @@
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
-      { text: 'Make one qualifying action each week, such as ' + weeklyFor(p) + ', so the wallet stays active.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
+      { text: 'Make one qualifying action each week, such as ' + weeklyFor(p) + ', so the wallet stays active and any points program sees it.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
+      { text: "Before you send anything, open " + p.name + "'s own site from the link DefiLlama lists for it and check the contract address and the points page match; never connect a wallet from a link in a reply, an ad or a direct message.", cost: 'nothing to check', time: '5 minutes' },
+      { text: secondActionFor(p, capital, chain), cost: 'about $' + Math.max(25, Math.round(capital / 2)) + ' of capital and about $3 of gas', time: '15 minutes' },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
       { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
     ].map(stepText);
+  }
+
+  // The live-token protocols in the same category, biggest market cap first: the names
+  // the row's category multiple is priced from.
+  function peersOf(row) {
+    return DATA.live.filter(function (r) { return (r.category || 'Other') === (row.category || 'Other'); }).slice(0, 3);
   }
 
   function readHash() {
@@ -309,6 +328,7 @@
         el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
         el('td', { class: 'num ' + (r.change_7d !== null && r.change_7d >= 0 ? 'pos' : 'neg'), text: fmtPct(r.change_7d) }),
         el('td', { class: 'num', text: fmtUsd(r.mcap_usd) }),
+        el('td', { class: 'num', text: fmtMult(r.multiple) }),
         el('td', null, el('span', { class: 'status live', text: 'already trades' }))
       ));
     });
@@ -316,7 +336,7 @@
       el('div', { class: 'table-wrap' },
         el('table', null,
           el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and their market-cap-per-TVL is what prices each pre-token category.' }),
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Token' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Mkt / TVL' }), el('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
       )
@@ -325,13 +345,30 @@
 
   function modelPanel() {
     var m = DATA.model;
+    var catBody = el('tbody');
+    DATA.categories.forEach(function (c) {
+      catBody.appendChild(el('tr', null,
+        el('td', null, el('b', { text: c.category })),
+        el('td', { class: 'num', text: String(c.sample) }),
+        el('td', { class: 'num', text: fmtMult(c.median) }),
+        el('td', { class: 'num', text: fmtMult(c.multiple) })
+      ));
+    });
+    var catTable = el('div', { class: 'table-wrap' },
+      el('table', null,
+        el('caption', { class: 'sub', text: 'What each category is priced at: the median market-cap-per-TVL of its live-token protocols, shrunk toward the global median ' + fmtMult(DATA.global_multiple) + ' by sample size. Categories with fewer than ' + m.min_category_sample + ' live protocols are priced at the global median and are not listed.' }),
+        el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Live names' }), el('th', { scope: 'col', text: 'Raw median' }), el('th', { scope: 'col', text: 'Multiple used' }))),
+        catBody
+      )
+    );
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
         'implied = round( tvl_usd x category_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + ' + m.breadth_per_chain + ' x min(chains - 1, ' + m.breadth_max_chains + ')) )'
       ),
-      el('p', { class: 'sub', text: 'Category multiple: the median market-cap-per-TVL of the live-token protocols in the same category (at least ' + m.min_category_sample + ' of them, else the global median ' + DATA.global_multiple + '), clamped to [' + m.multiple_floor + ', ' + m.multiple_cap + ']. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Chain breadth rewards protocols live on more chains.' }),
+      el('p', { class: 'sub', text: 'Category multiple: the median market-cap-per-TVL of the live-token protocols in the same category, shrunk toward the global median ' + fmtMult(DATA.global_multiple) + ' with weight n / (n + ' + m.shrinkage_prior + ') for a category with n live names, clamped to [' + m.multiple_floor + ', ' + m.multiple_cap + ']. A category with fewer than ' + m.min_category_sample + ' live names uses the global median outright: a median of one or two names is not a market. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Chain breadth rewards protocols live on more chains.' }),
+      catTable,
       el('p', { class: 'note', text: 'A protocol on this board records no token in the snapshot. That is DefiLlama\u2019s record, not proof: it may still have a token the record does not carry. Implied value is this entry\u2019s own claim, never make.fun\u2019s.' })
     );
   }
@@ -347,6 +384,7 @@
     dialog.textContent = '';
     var steps = farmSteps(row);
     var recomputed = impliedOf(row, DATA.model);
+    var peers = peersOf(row);
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size + (row.on_watchlist ? '  ·  Watchlist' : '  ·  Early') }),
@@ -360,6 +398,7 @@
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
         el('div', null, el('span', { text: 'Category multiple' }), el('b', { class: 'num', text: fmtMult(row.category_multiple) })),
+        el('div', null, el('span', { text: 'Live names behind it' }), el('b', { class: 'num', text: row.category_sample > 0 ? String(row.category_sample) + ' in category' : 'global median' })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: 'x' + row.growth_multiplier })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
@@ -370,6 +409,27 @@
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
+    if (peers.length > 0) {
+      var peerBody = el('tbody');
+      peers.forEach(function (p) {
+        peerBody.appendChild(el('tr', null,
+          el('td', null, el('b', { text: p.name })),
+          el('td', { class: 'num', text: fmtUsd(p.tvl_usd) }),
+          el('td', { class: 'num', text: fmtUsd(p.mcap_usd) }),
+          el('td', { class: 'num', text: fmtMult(p.multiple) })
+        ));
+      });
+      dialog.appendChild(el('section', { class: 'detail-section' },
+        el('h3', { text: 'Where the multiple comes from' }),
+        el('p', { class: 'sub', text: 'The largest live-token protocols in ' + (row.category || 'Other') + '. Their market-cap-per-TVL is the market this row is priced against; the multiple used is the category median of all of them, shrunk toward the global median by sample size.' }),
+        el('div', { class: 'table-wrap' },
+          el('table', null,
+            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Live protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Mkt / TVL' }))),
+            peerBody
+          )
+        )
+      ));
+    }
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
