@@ -1,11 +1,20 @@
 // Token Radar's entrypoint (Node 22, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
-// pre-token protocol with the radar-3 model in lib/model.ts, writes the ranked board to
+// pre-token protocol with the radar-4 model in lib/model.ts, writes the ranked board to
 // /output/board.json, writes the dashboard's data beside the page as data.js, copies this
 // repository's dashboard/ and screenshots/ to /output, and writes /output/dossier.json with
 // the vendored make.fun library. The program runs twice in grading and both runs must write
 // the same bytes, so nothing here reads the clock, the network or a random source.
+//
+// radar-4 prices a category off the geometric median of its live-token market-cap-per-TVL
+// (a ratio's centre is geometric, so an even sample takes the geometric mean of its two
+// middle ratios instead of the arithmetic mean the larger one dominates), discounts a
+// falling protocol harder than it rewards a rising one, and scores age as a launch window
+// that peaks 12 to 24 months in instead of rewarding age without end. The farm plans add
+// the risk the protocol's own category carries and, for a protocol on two or more chains,
+// a step that repeats the position on its second chain, and the detail view shows the
+// protocols ranked nearest to each row in its own category.
 //
 // Before it exits it reads its own board.json back and checks it again: the ranks, the
 // order, the watchlist coverage, the farm steps and the rank-1 row must be the same ones
@@ -87,9 +96,9 @@ function copyFiles(from: string, to: string): string[] {
 
 /**
  * The board's own model summary, written into board.json beside the rows: the global
- * multiple, every priced category with its sample and raw median, and the top of the
- * board, so a reader of board.json alone can see what the ranking rests on without
- * re-running the model.
+ * geometric multiple, every priced category with its sample and raw geometric median,
+ * and the top of the board, so a reader of board.json alone can see what the ranking
+ * rests on without re-running the model.
  */
 function modelSummary(): {
   version: string;

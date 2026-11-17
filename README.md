@@ -8,22 +8,29 @@ Every pre-token protocol in the sealed DefiLlama snapshot, ranked by what its
 launch would be worth, each with a farm plan. Built for make.fun's
 token-radar-01 bounty ($1,325).
 
-## The model (radar-3)
+## The model (radar-4)
 
 Implied value is priced off the snapshot's own live market, never a fixed
 multiple and never a hand-picked name:
 
 ```
-implied = round(TVL x category_multiple x growth x maturity x breadth)
+implied = round(TVL x category_multiple x growth x readiness x breadth)
 ```
 
-- **category_multiple** — median market-cap-per-TVL of the live-token
-  protocols in the same category, shrunk toward the global median 0.2460
-  with weight n / (n + 8) for n live names (min 3, else the global median),
-  clamped to [0.05, 2.0]. Lending is priced like lending trades, and a
-  3-name median no longer prices a whole category on its own.
-- **growth** — `1 + clamp(change_7d, -60, 120) / 100 x 0.5`
-- **maturity** — `0.6 + min(age_days, 1095) / 1095 x 0.4` (unknown age: 365d)
+- **category_multiple** — geometric median market-cap-per-TVL of the
+  live-token protocols in the same category, shrunk toward the global
+  geometric median 0.2460 with weight n / (n + 8) for n live names (min 3,
+  else the global median), clamped to [0.05, 2.0]. A multiple is a ratio, so
+  its centre is geometric: for an even sample it is the geometric mean of
+  the two middle ratios, not the arithmetic mean the larger one dominates.
+- **growth** — `1 + clamp(change_7d, -60, 120) / 100 x 0.5` when up,
+  `x 0.75` when down: a fall discounts harder than a rise of the same size
+  rewards, because a protocol losing TVL is losing the market that would
+  buy its token.
+- **readiness** — the launch window: `0.70 + 0.30 x age / 540` to 540 days,
+  1.00 to 730 days, then falling to 0.80 over the next 1095 days (unknown
+  age: 365d). A protocol that has run five years with no token has shown it
+  can live without one; the window is 12 to 24 months in.
 - **breadth** — `1 + 0.03 x min(chains - 1, 10)`, at most x1.30
 
 The board ranks **every** rankable pre-token protocol (watchlist + all
@@ -37,9 +44,12 @@ each category multiple is priced from.
 Static, no network: sortable board, search + category + chain filters,
 early-only toggle, pre-token / live-token tabs, and a detail view per
 protocol with the full model breakdown, the live-token peers its multiple
-is priced from, and an 8-step farm plan (every step states its cost and
-time). A category pricing table shows every multiple with its sample and
-raw median. The page recomputes each row and checks it against board.json.
+is priced from, the protocols ranked nearest to it in its own category,
+and a 9-10 step farm plan (every step states its cost and time, including
+the risk its category carries and, for a protocol on two or more chains, a
+step that repeats the position on its second chain). A category pricing
+table shows every multiple with its sample and raw geometric median. The
+page recomputes each row and checks it against board.json.
 
 ## Run
 

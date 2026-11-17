@@ -1,4 +1,4 @@
-// Token Radar's model (radar-3): one sealed snapshot in, one ranked board out.
+// Token Radar's model (radar-4): one sealed snapshot in, one ranked board out.
 //
 // The board ranks every pre-token protocol the snapshot can rank: the watchlist is the floor
 // (every watchlist slug is always in) and the early radar adds every other pre-token protocol
@@ -8,21 +8,35 @@
 //
 // Implied value is priced off the snapshot's own live market, not off a fixed multiple:
 //
-//   catMult  = the category's live median market-cap-per-TVL, shrunk toward the global
-//              median by sample size: w = n / (n + 8), mult = w * median + (1 - w) * global.
-//              A category with fewer than 3 live protocols falls back to the global median
-//              outright, so no multiple ever rests on one or two names, and a category with
-//              3 or 4 names is no longer priced by its raw median alone (a 4-name median of
-//              1.22x, or a 3-name median of 0.97x, is mostly noise). The result is clamped
-//              to [0.05, 2.0]. Centralised exchanges are left out of both medians: they trade
-//              as exchange equity, not as DeFi protocols. A lending protocol is priced like
-//              lending protocols trade, a bridge like bridges trade.
-//   growth   = clamp(change_7d, -60, 120) per cent
-//   growthM  = 1 + (growth / 100) * 0.5
-//   maturity = 0.6 + min(age_days, 1095) / 1095 * 0.4   (age unknown: 365 days)
+//   catMult  = the category's live geometric median market-cap-per-TVL, shrunk toward the
+//              global geometric median by sample size: w = n / (n + 8), mult = w * median +
+//              (1 - w) * global. A multiple is a ratio, and ratios compound multiplicatively,
+//              so the centre of a set of ratios is the geometric median (the median of the
+//              logs, exponentiated): for an odd sample that is the plain median, and for an
+//              even sample it is the geometric mean of the two middle ratios instead of the
+//              arithmetic mean, which the larger middle ratio dominates in a skewed sample
+//              (Cross Chain Bridge's raw median falls from 1.22x to 0.72x, Bridge's from
+//              0.56x to 0.35x). A category with fewer than 3 live protocols falls back to the
+//              global median outright, so no multiple ever rests on one or two names, and a
+//              category with 3 or 4 names is no longer priced by its raw median alone. The
+//              result is clamped to [0.05, 2.0]. Centralised exchanges are left out of both
+//              medians: they trade as exchange equity, not as DeFi protocols. A lending
+//              protocol is priced like lending protocols trade, a bridge like bridges trade.
+//   growth   = clamp(change_7d, -60, 120) per cent, and the multiplier is asymmetric:
+//              a fall discounts harder than a rise of the same size rewards it, because a
+//              protocol losing TVL is losing the market that would buy its token.
+//              growthM = 1 + (growth / 100) * 0.5 when growth is up, 1 + (growth / 100) * 0.75
+//              when it is down.
+//   readiness = the launch window: 0.70 + 0.30 * age / 540 up to 540 days, 1.00 from 540 to
+//              730 days, then falling 0.20 over the next 1095 days to a floor of 0.80 (age
+//              unknown: 365 days). A protocol that has run five years with no token has shown
+//              it can live without one, so the window is 12 to 24 months in, not "older is
+//              always better": the very young are unproven, the very old have had their
+//              window, and the peak is a protocol established enough to launch and still
+//              young enough to want to.
 //   breadth  = 1 + 0.03 * min(chains - 1, 10), at most 1.30: a protocol live on more chains
 //              reaches more future holders.
-//   implied  = max(1, round(tvl_usd * catMult * growthM * maturity * breadth))
+//   implied  = max(1, round(tvl_usd * catMult * growthM * readiness * breadth))
 //
 // No protocol name is ever special-cased: the same function scores every row, and the
 // dashboard recomputes each row from the same figures so the page and board.json agree.
@@ -52,12 +66,15 @@ export interface Snapshot {
 
 /** The model's constants, as the dashboard states them. */
 export interface ModelConstants {
-  growth_weight: number;
+  growth_weight_up: number;
+  growth_weight_down: number;
   growth_floor: number;
   growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
+  readiness_floor: number;
+  readiness_peak_days: number;
+  readiness_plateau_days: number;
+  readiness_old_floor: number;
+  readiness_old_days: number;
   unknown_age_days: number;
   breadth_per_chain: number;
   breadth_max_chains: number;
@@ -68,12 +85,15 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  growth_weight: 0.5,
+  growth_weight_up: 0.5,
+  growth_weight_down: 0.75,
   growth_floor: -60,
   growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
+  readiness_floor: 0.7,
+  readiness_peak_days: 540,
+  readiness_plateau_days: 730,
+  readiness_old_floor: 0.8,
+  readiness_old_days: 1095,
   unknown_age_days: 365,
   breadth_per_chain: 0.03,
   breadth_max_chains: 10,
@@ -84,7 +104,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 40;
@@ -117,7 +137,7 @@ export interface BoardRow {
     category_sample: number;
     growth_pct: number;
     growth_multiplier: number;
-    maturity_multiplier: number;
+    readiness_multiplier: number;
     breadth_multiplier: number;
     age_days: number | null;
   };
@@ -140,7 +160,7 @@ export interface RadarRow {
   category_multiple: number;
   category_sample: number;
   growth_multiplier: number;
-  maturity_multiplier: number;
+  readiness_multiplier: number;
   breadth_multiplier: number;
   on_watchlist: boolean;
 }
@@ -203,12 +223,21 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
-/** The median of a sorted-ascending copy of `values`; null when empty. */
-function median(values: number[]): number | null {
+/**
+ * The geometric median of positive `values`: the median of their logs, exponentiated.
+ * A multiple is a ratio, so its centre is taken on the multiplicative scale: for an odd
+ * sample this is the plain median, and for an even sample it is the geometric mean of
+ * the two middle ratios instead of their arithmetic mean, which the larger middle ratio
+ * dominates in a skewed sample (on this snapshot the two middle Cross Chain Bridge
+ * ratios average to 1.22x arithmetically and 0.72x geometrically, and the geometric one
+ * is the centre the market actually shows).
+ */
+function geoMedian(values: number[]): number | null {
   if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  const logs = values.map((v) => Math.log(v)).sort((a, b) => a - b);
+  const mid = Math.floor(logs.length / 2);
+  const centre = logs.length % 2 === 1 ? logs[mid]! : (logs[mid - 1]! + logs[mid]!) / 2;
+  return Math.exp(centre);
 }
 
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
@@ -221,16 +250,16 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
 }
 
 /**
- * The comparable multiples: for every category, the median market-cap-per-TVL of its
- * live-token protocols shrunk toward the global median by sample size, and the global
- * median over all of them. A category with fewer than `min_category_sample` live
- * protocols falls back to the global median, so no multiple ever rests on one or two
- * names; a category with 3 or 4 names is pulled most of the way to the global median
- * (its weight is n / (n + shrinkage_prior)), because a median of 3 is mostly noise —
- * on this snapshot the raw 4-name median of Cross Chain Bridge is 1.22x and the raw
- * 3-name median of Privacy is 0.97x, and neither survives shrinkage (0.57x, 0.44x).
- * `detail` carries every priced category with its sample and raw median, so the
- * dashboard can show what each multiple rests on.
+ * The comparable multiples: for every category, the geometric median market-cap-per-TVL
+ * of its live-token protocols shrunk toward the global geometric median by sample size,
+ * and the global geometric median over all of them. A category with fewer than
+ * `min_category_sample` live protocols falls back to the global median, so no multiple
+ * ever rests on one or two names; a category with 3 or 4 names is pulled most of the way
+ * to the global median (its weight is n / (n + shrinkage_prior)), because a median of 3
+ * is mostly noise — on this snapshot the raw 4-name geometric median of Cross Chain
+ * Bridge is 0.72x and the raw 3-name median of Privacy is 0.97x, and neither survives
+ * shrinkage (0.40x, 0.44x). `detail` carries every priced category with its sample and
+ * raw median, so the dashboard can show what each multiple rests on.
  */
 export function categoryMultiples(
   snapshot: Snapshot,
@@ -252,12 +281,12 @@ export function categoryMultiples(
     if (list) list.push(ratio);
     else perCategory.set(key, [ratio]);
   }
-  const global = clamp(median(all) ?? 0.2, model.multiple_floor, model.multiple_cap);
+  const global = clamp(geoMedian(all) ?? 0.2, model.multiple_floor, model.multiple_cap);
   const byCategory = new Map<string, number>();
   const detail = new Map<string, { multiple: number; sample: number; median: number }>();
   for (const [key, ratios] of perCategory) {
     if (ratios.length < model.min_category_sample) continue;
-    const raw = median(ratios) ?? global;
+    const raw = geoMedian(ratios) ?? global;
     // Shrinkage: a small sample's median is pulled toward the global median, with
     // weight n / (n + prior). A 15-name category keeps two thirds of its own median;
     // a 3-name category keeps barely a quarter of it.
@@ -269,27 +298,44 @@ export function categoryMultiples(
   return { byCategory, global, detail };
 }
 
+/**
+ * The launch window for a protocol of `age` days: 0.70 at listing, rising to 1.00 at
+ * `readiness_peak_days`, flat to `readiness_plateau_days`, then falling to
+ * `readiness_old_floor` over `readiness_old_days`. A protocol that has run five years
+ * with no token has shown it can live without one, so its window has passed; a protocol
+ * a month old is unproven. The peak is the protocol established enough to launch and
+ * still young enough to want to.
+ */
+export function readinessMultiplier(age: number | null, model: ModelConstants = MODEL): number {
+  const a = age ?? model.unknown_age_days;
+  if (a <= model.readiness_peak_days) {
+    return model.readiness_floor + (1 - model.readiness_floor) * (a / model.readiness_peak_days);
+  }
+  if (a <= model.readiness_plateau_days) return 1;
+  const past = Math.min(a - model.readiness_plateau_days, model.readiness_old_days);
+  return Math.max(model.readiness_old_floor, 1 - (1 - model.readiness_old_floor) * (past / model.readiness_old_days));
+}
+
 /** The multipliers and the implied value one protocol gets under `model`. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   multiples: { byCategory: Map<string, number>; global: number },
   model: ModelConstants = MODEL,
-): { implied: number; catMult: number; catSample: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
+): { implied: number; catMult: number; catSample: number; growthPct: number; growthMult: number; readinessMult: number; breadthMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = clamp(rawGrowth, model.growth_floor, model.growth_cap);
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult =
-    model.maturity_floor +
-    (clamp(ageForModel, 0, model.maturity_days) / model.maturity_days) * model.maturity_range;
+  // Asymmetric growth: a fall discounts harder than a rise of the same size rewards it,
+  // because a protocol losing TVL is losing the market that would buy its token.
+  const growthMult = 1 + (growthPct / 100) * (growthPct < 0 ? model.growth_weight_down : model.growth_weight_up);
+  const readinessMult = readinessMultiplier(age, model);
   const extraChains = Math.max(0, protocol.chains.length - 1);
   const breadthMult = 1 + model.breadth_per_chain * Math.min(extraChains, model.breadth_max_chains);
   const catMult = multiples.byCategory.get(protocol.category ?? 'Other') ?? multiples.global;
   const base = protocol.tvl_usd * catMult;
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * breadthMult));
-  return { implied, catMult, catSample: categorySample(protocol, multiples), growthPct, growthMult, maturityMult, breadthMult, age };
+  const implied = Math.max(1, Math.round(base * growthMult * readinessMult * breadthMult));
+  return { implied, catMult, catSample: categorySample(protocol, multiples), growthPct, growthMult, readinessMult, breadthMult, age };
 }
 
 /** How many live-token protocols the protocol's category multiple rests on (0: the global median). */
@@ -394,7 +440,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       category_sample: s.catSample,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
+      readiness_multiplier: round4(s.readinessMult),
       breadth_multiplier: round4(s.breadthMult),
       age_days: s.age,
     },
@@ -476,13 +522,49 @@ function secondActionFor(p: SnapshotProtocol, capital: number, chain: string): s
   return `Make a second, smaller deposit of $${half} into ${name} on ${chain} a week after the first, so the wallet shows repeated use.`;
 }
 
+/** The second chain a protocol names, or null when it runs on one chain only. */
+function secondChainOf(p: SnapshotProtocol): string | null {
+  return p.chains.length >= 2 ? p.chains[1]! : null;
+}
+
+/** The one risk to check before the money moves, by what the protocol actually does. */
+function riskFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  const name = p.name;
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral'))
+    return `Check the borrow rate, the collateral factor and the liquidation threshold on ${name} before you supply, and keep the loan-to-value well below the liquidation line.`;
+  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm'))
+    return `Check the pool's fee tier and the price range of the pair on ${name} before you provide liquidity, and size the position so impermanent loss cannot take the whole deposit.`;
+  if (c.includes('perpetual') || c.includes('derivative'))
+    return `Check the funding rate and the liquidation price on ${name} before you open the trade, and keep the margin small enough that one move cannot liquidate it.`;
+  if (c.includes('bridge'))
+    return `Check the bridge's finality time and its fee on both chains before you bridge through ${name}, and send a small test transfer first.`;
+  if (c.includes('staking') || c.includes('restak'))
+    return `Check the unstaking delay and any slashing terms on ${name} before you stake, so the position is not locked past the point you need it.`;
+  if (c.includes('prediction'))
+    return `Check the market's resolution rule and its expiry on ${name} before you place a position, so a win cannot be voided by the fine print.`;
+  if (c.includes('stable'))
+    return `Check what backs the stable asset on ${name} and where its reserves are published before you mint or deposit.`;
+  if (c.includes('rwa'))
+    return `Check the issuer, the redemption terms and the audit record of ${name}'s yield-bearing asset before you mint it.`;
+  if (c.includes('insurance'))
+    return `Check what the cover excludes and how a claim is paid on ${name} before you buy the policy.`;
+  if (c.includes('basis'))
+    return `Check the funding history and the basis vault's drawdown on ${name} before you deposit, so a negative funding stretch cannot eat the yield.`;
+  return `Check the protocol's audit record and the size of its largest pool on ${name} before you deposit, and keep the position small enough to lose.`;
+}
+
 /**
- * A protocol's farm plan: eight steps, each an action with a cost and a time. The plan is
- * derived from the protocol's own record (category, chains, TVL, age), never from a
- * hand-written list of names. The new fourth step is the one farmers skip and scammers
+ * A protocol's farm plan: nine or ten steps, each an action with a cost and a time. The
+ * plan is derived from the protocol's own record (category, chains, TVL, age), never from
+ * a hand-written list of names. The fourth step is the one farmers skip and scammers
  * count on: verify the address and the points page from the protocol's own site before
  * the money moves, because a fake farm page costs the whole position, and the fifth
- * step adds a second position type so the wallet is not a one-action farmer.
+ * step adds a second position type so the wallet is not a one-action farmer. The sixth
+ * step is the risk the protocol's own category carries, checked before the deposit
+ * rather than after the loss, and a protocol on two or more chains gets a seventh step
+ * that repeats the position on its second chain, so the wallet is active on more than
+ * one chain the protocol counts.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
@@ -490,7 +572,8 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
   const weekly = weeklyFor(p);
-  return [
+  const secondChain = secondChainOf(p);
+  const steps: FarmStep[] = [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
       cost: 'under $3 of gas for the first transaction',
@@ -517,6 +600,20 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '15 minutes',
     },
     {
+      text: riskFor(p),
+      cost: 'nothing to check',
+      time: '10 minutes',
+    },
+  ];
+  if (secondChain !== null) {
+    steps.push({
+      text: `Repeat the position on ${secondChain} with a smaller amount, so the wallet is active on more than one chain ${p.name} counts.`,
+      cost: `about $${Math.max(25, Math.round(capital / 2))} of capital and about $3 of gas`,
+      time: '15 minutes',
+    });
+  }
+  steps.push(
+    {
       text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
@@ -531,7 +628,8 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       cost: 'nothing but the log',
       time: '5 minutes',
     },
-  ];
+  );
+  return steps;
 }
 
 /** The live-token protocols, by market cap, for the dashboard's Live token view. */
@@ -572,7 +670,7 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
     category_multiple: row.model.category_multiple,
     category_sample: row.model.category_sample,
     growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
+    readiness_multiplier: row.model.readiness_multiplier,
     breadth_multiplier: row.model.breadth_multiplier,
     on_watchlist: watchlist.has(row.slug),
   };
